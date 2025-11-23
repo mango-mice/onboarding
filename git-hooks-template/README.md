@@ -18,8 +18,6 @@ Install [pre-commit](https://pre-commit.com/):
 
 ```bash
 pip install pre-commit
-# or
-brew install pre-commit
 ```
 
 ## Installation
@@ -55,7 +53,6 @@ brew install pre-commit
 
    ```bash
    pre-commit install
-   pre-commit install --hook-type commit-msg
    ```
 
 ## How It Works
@@ -71,8 +68,6 @@ brew install pre-commit
 - Runs before the commit is created
 - Scans all staged files for AI indicators
 - Blocks the commit if any indicators are found in the code
-- Skips binary files automatically
-- Compatible with bash 3.2+ (macOS default)
 
 ## Uninstallation
 
