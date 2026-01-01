@@ -15,6 +15,7 @@ from pathlib import Path
 import shutil
 import signal
 import json
+import re
 from typing import List, Optional, Dict, Any
 
 # Dynamically find specstory-real, handling homebrew upgrades
@@ -190,22 +191,48 @@ def first_meaningful_line_after(lines: List[str], start_idx: int) -> str:
 
 
 def get_timestamp_file_for_md(md_path: str) -> str:
-    """Given an absolute markdown path, return the absolute timestamps file path alongside it."""
-    md_abs = os.path.abspath(md_path)
+    """Given a markdown path (absolute or relative), return the absolute timestamps file path alongside it.
+    
+    Works cross-platform (Linux, macOS, Windows) by normalizing paths properly.
+    """
+    # Normalize and resolve to absolute path (handles relative paths, .., ., symlinks, etc.)
+    # This works even if the file doesn't exist yet (handles cases where file is being created)
+    md_abs = os.path.abspath(os.path.normpath(md_path))
+    
+    # Derive directories: md_path is in .specstory/history/, so:
+    # md_abs = /path/to/project/.specstory/history/file.md
+    # history_dir = /path/to/project/.specstory/history
+    # specstory_dir = /path/to/project/.specstory
     history_dir = os.path.dirname(md_abs)  # .../.specstory/history
     specstory_dir = os.path.dirname(history_dir)  # .../.specstory
+    
+    # Build timestamps directory path using os.path.join for cross-platform compatibility
     ts_dir_for_file = os.path.join(specstory_dir, "timestamps")
+    
+    # Create directory if it doesn't exist (works on all platforms)
     os.makedirs(ts_dir_for_file, exist_ok=True)
+    
+    # Get base filename without extension (cross-platform)
     base = Path(md_abs).stem
-    return os.path.join(ts_dir_for_file, f"{base}.timestamps")
+    
+    # Return absolute path to timestamp file
+    ts_file_path = os.path.join(ts_dir_for_file, f"{base}.timestamps")
+    return os.path.normpath(ts_file_path)
 
 def get_most_recent_md_file() -> Optional[str]:
-    """Get the most recently modified .md file in the current project's history directory."""
-    md_files = glob.glob(f"{HIST_DIR}/*.md")
+    """Get the most recently modified .md file in the current project's history directory.
+    
+    Works cross-platform by normalizing paths properly.
+    """
+    # Use os.path.join for cross-platform path construction
+    hist_pattern = os.path.join(HIST_DIR, "*.md")
+    md_files = glob.glob(hist_pattern)
     if not md_files:
         return None
-    latest_rel = max(md_files, key=os.path.getmtime)
-    return os.path.abspath(latest_rel)
+    # Normalize paths and get the most recent one
+    md_files_abs = [os.path.abspath(os.path.normpath(f)) for f in md_files]
+    latest = max(md_files_abs, key=os.path.getmtime)
+    return os.path.normpath(latest)
 
 def start_watcher(before_file: Optional[str], before_mtime: Optional[float]) -> None:
     """Start the background watcher that logs timestamp|first-line for new User/Agent entries."""
@@ -223,8 +250,10 @@ def start_watcher(before_file: Optional[str], before_mtime: Optional[float]) -> 
     # Determine which history file to watch by detecting any md whose mtime increases
     # since startup, or any new md that appears. This supports both new sessions and resumes.
     def list_md_files():
-        files = glob.glob(f"{HIST_DIR}/*.md")
-        return [os.path.abspath(p) for p in files]
+        # Use os.path.join for cross-platform path construction
+        hist_pattern = os.path.join(HIST_DIR, "*.md")
+        files = glob.glob(hist_pattern)
+        return [os.path.abspath(os.path.normpath(p)) for p in files]
 
     # Snapshot initial mtimes
     initial_mtimes = {}
@@ -299,20 +328,46 @@ def start_watcher(before_file: Optional[str], before_mtime: Optional[float]) -> 
         time.sleep(POLL_INTERVAL)
 
 
+def extract_base_role(header_line: str) -> str:
+    """Extract the base role from a header, removing timestamp if present.
+    
+    Examples:
+        '_**User**_' -> 'User'
+        '_**User (2024-01-01T12:00:00Z)**_' -> 'User'
+        '_**Agent**_' -> 'Agent'
+    """
+    # Remove _** and **_
+    content = header_line[3:-3]
+    # Check if there's a timestamp in parentheses
+    if '(' in content and ')' in content:
+        # Extract everything before the opening parenthesis
+        role = content.split('(')[0].strip()
+        return role
+    return content.strip()
+
+def header_has_timestamp(header_line: str) -> bool:
+    """Check if a header line already contains a timestamp."""
+    content = header_line[3:-3] if header_line.startswith('_**') and header_line.endswith('**_') else header_line
+    # Check for timestamp pattern: (YYYY-MM-DDTHH:MM:SSZ)
+    return bool(re.search(r'\(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\)', content))
+
 def merge_timestamps(target_md: Optional[str] = None) -> None:
     """Insert timestamps into the markdown headers from the corresponding timestamps file.
 
     Args:
-        target_md: Path to the markdown file to process. If None, uses the most recent file.
+        target_md: Path to the markdown file to process (absolute or relative). 
+                   If None, uses the most recent file.
     """
     if target_md:
-        latest_md = os.path.abspath(target_md)
+        # Normalize path for cross-platform compatibility
+        latest_md = os.path.abspath(os.path.normpath(target_md))
     else:
         latest_md = get_most_recent_md_file()
     if not latest_md:
         return
 
-    latest_md = os.path.abspath(latest_md)
+    # Ensure path is normalized (handles edge cases)
+    latest_md = os.path.normpath(latest_md)
     timestamp_file = get_timestamp_file_for_md(latest_md)
 
     # Ensure timestamp file exists; do not early-return on empty as we may need to backfill
@@ -341,58 +396,69 @@ def merge_timestamps(target_md: Optional[str] = None) -> None:
             pass
         return
 
-    # Backfill any missing timestamps for headers that have content but weren't logged (e.g., watcher stopped early)
+    # Read markdown file and build header-to-snippet mapping
     md_lines = read_lines_text(latest_md)
     header_idxs = find_conversation_header_indices(md_lines)
-    # Only count headers which have meaningful content following
-    headers_with_content = []
-    for h in header_idxs:
-        header_txt = md_lines[h].strip() if h < len(md_lines) else ''
-        snippet = first_meaningful_line_after(md_lines, h)
+    
+    # Build mapping of header indices to their snippets (only headers with content)
+    header_snippet_map = {}
+    for h_idx in header_idxs:
+        header_txt = md_lines[h_idx].strip() if h_idx < len(md_lines) else ''
+        snippet = first_meaningful_line_after(md_lines, h_idx)
         if snippet and snippet != header_txt and snippet != '---':
-            headers_with_content.append((h, snippet))
+            header_snippet_map[h_idx] = snippet
 
+    # Read existing timestamps and build snippet-to-timestamp mapping
     with open(timestamp_file, 'r', encoding='utf-8') as f:
         existing = [ln.strip() for ln in f if ln.strip()]
 
-    if len(existing) < len(headers_with_content):
+    # Build mapping from snippet to timestamp
+    timestamp_map = {}
+    for ts_line in existing:
+        parts = ts_line.split('|', 1)
+        if len(parts) == 2:
+            ts, snippet = parts[0].strip(), parts[1].strip()
+            timestamp_map[snippet] = ts
+
+    # Backfill missing timestamps for headers with content
+    headers_with_content = [(h_idx, snippet) for h_idx, snippet in header_snippet_map.items()]
+    missing_timestamps = []
+    for h_idx, snippet in headers_with_content:
+        if snippet not in timestamp_map:
+            missing_timestamps.append((h_idx, snippet))
+    
+    if missing_timestamps:
         # Append missing timestamps with the corresponding snippets
         now_ts = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         with open(timestamp_file, 'a', encoding='utf-8') as f:
-            for i in range(len(existing), len(headers_with_content)):
-                _, snippet = headers_with_content[i]
+            for _, snippet in missing_timestamps:
                 f.write(f"{now_ts}|{snippet}\n")
+                timestamp_map[snippet] = now_ts
 
-    # Read timestamps
-    with open(timestamp_file, 'r', encoding='utf-8') as f:
-        raw = [line.strip() for line in f if line.strip()]
-    timestamps = []
-    last = None
-    for ts in raw:
-        if ts != last:
-            timestamps.append(ts)
-            last = ts
-
-    # Process the markdown file
+    # Process the markdown file, matching timestamps to headers by snippet
     temp_file = f"{latest_md}.tmp"
-    timestamp_index = 0
 
-    with open(latest_md, 'r', encoding='utf-8') as md_in, \
-         open(temp_file, 'w', encoding='utf-8') as md_out:
-        for line in md_in:
-            line = line.rstrip('\n')
+    with open(temp_file, 'w', encoding='utf-8') as md_out:
+        for line_idx, line in enumerate(md_lines):
             # Check if this line is a User or Agent header
             if line.startswith('_**') and ('User' in line or 'Agent' in line) and line.endswith('**_'):
-                # Extract the role (User or Agent...)
-                role = line[3:-3]  # Remove _** and **_
-
-                # Get the next timestamp if available
-                if timestamp_index < len(timestamps) and timestamps[timestamp_index]:
-                    ts_line = timestamps[timestamp_index]
-                    ts_display = ts_line.split('|', 1)[0].strip()
-                    md_out.write(f"_**{role} ({ts_display})**_\n")
-                    timestamp_index += 1
+                # Check if header already has a timestamp
+                if header_has_timestamp(line):
+                    # Header already has timestamp, preserve it
+                    md_out.write(line + '\n')
+                elif line_idx in header_snippet_map:
+                    # Header has content, try to find matching timestamp
+                    snippet = header_snippet_map[line_idx]
+                    if snippet in timestamp_map:
+                        # Extract base role and add timestamp
+                        base_role = extract_base_role(line)
+                        ts_display = timestamp_map[snippet]
+                        md_out.write(f"_**{base_role} ({ts_display})**_\n")
+                    else:
+                        # No timestamp found, write header as-is
+                        md_out.write(line + '\n')
                 else:
+                    # Header without content, write as-is
                     md_out.write(line + '\n')
             else:
                 md_out.write(line + '\n')
@@ -401,10 +467,17 @@ def merge_timestamps(target_md: Optional[str] = None) -> None:
     shutil.move(temp_file, latest_md)
 
 def merge_all_timestamps() -> None:
-    """Merge timestamps into all markdown files in the history directory."""
-    md_files = glob.glob(f"{HIST_DIR}/*.md")
+    """Merge timestamps into all markdown files in the history directory.
+    
+    Works cross-platform by normalizing paths properly.
+    """
+    # Use os.path.join for cross-platform path construction
+    hist_pattern = os.path.join(HIST_DIR, "*.md")
+    md_files = glob.glob(hist_pattern)
     for md_path in md_files:
-        merge_timestamps(md_path)
+        # Normalize path before processing
+        md_path_normalized = os.path.abspath(os.path.normpath(md_path))
+        merge_timestamps(md_path_normalized)
 
 
 def _try_kill_process(pid: int, sig: signal.Signals) -> None:

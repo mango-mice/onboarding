@@ -96,6 +96,27 @@ When your SpecStory CLI tool is running (with Claude), you should see a banner l
 ╰──────────────────────────────────────────────────╯
 ```
 
+**Automated Verification:**
+
+You should also use the provided verifier script to automatically check that:
+
+1. Both Claude and Cursor sessions are present
+2. All User/Agent headers have timestamps
+
+Run the verifier from the repository root:
+
+```bash
+python tools/specstory/verify_specstory.py
+```
+
+Or verify a specific project directory:
+
+```bash
+python tools/specstory/verify_specstory.py /path/to/project
+```
+
+The verifier will report which files (if any) are missing timestamps and need attention.
+
 > Reminder to update your [status](https://forms.gle/SLXdJk3SbjHCYnpd9) once you have completed this step.
 
 ## 5) Install Git Hooks
