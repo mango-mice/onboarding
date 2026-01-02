@@ -1,5 +1,11 @@
-export function convertWeight(value, from, to) {
-  if (from === "g" && to === "oz") return value / 28.3495;
-  if (from === "oz" && to === "g") return value * 28.3495;
-  throw new Error(`Unsupported weight conversion: ${from} to ${to}`);
+export function convertWeight(value, from, to, precision = 2) {
+  let result;
+  if (from === "g" && to === "oz") {
+    result = value / 28.3495;
+  } else if (from === "oz" && to === "g") {
+    result = value * 28.3495;
+  } else {
+    throw new Error(`Unsupported weight conversion: ${from} to ${to}`);
+  }
+  return Number(result.toFixed(precision));
 }
